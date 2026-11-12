@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Test barcode generator</title>
+<!-- shortcut: bwip-js comes from a CDN, so the page needs internet; paste the script inline if the demo must run offline -->
+<script src="https://cdn.jsdelivr.net/npm/bwip-js@4.5.1/dist/bwip-js-min.js"></script>
+<style>
+  body { font: 14px system-ui, sans-serif; margin: 1rem; color: #111; background: #fff; }
+  h1 { font-size: 1.2rem; }
+  form { display: flex; flex-wrap: wrap; gap: .5rem 1rem; align-items: end; }
+  label { display: grid; gap: 2px; font-size: 12px; }
+  input, select, button { font: inherit; padding: 4px 6px; }
+  #err { color: #b00020; min-height: 1.2em; }
+  #labels { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-start; }
+  .label { position: relative; width: min-content; min-width: 200px; padding: 8px; text-align: center;
+           border: 1px solid #999; border-radius: 4px; break-inside: avoid; }
+  .label canvas { max-width: calc(100vw - 4rem); }
+  .label b, .label code, .label small { display: block; }
+  .label b { padding: 0 1.5rem; } /* keeps the title clear of the remove button */
+  .label code { font-size: 11px; word-break: break-all; }
+  .label button { position: absolute; top: 2px; right: 2px; }
+  .expired { color: #b00020; font-weight: bold; }
+  @media print { h1, form, #err, .label button { display: none; } body { margin: 0; } }
+</style>
+
+<h1>Test barcode generator</h1>
+<form id="f">
+  <label>Description <input name="desc" value="Demo item"></label>
+  <label>GTIN <input name="gtin" value="09506000134352" inputmode="numeric" size="16"></label>
+  <label>Lot (10) <input name="lot" size="12"></label>
+  <label>Serial (21) <input name="serial" size="12"></label>
+  <label>Expiry (17) <input name="exp" type="date"></label>
+  <span>
+    <button type="button" data-days="365">Valid</button>
+    <button type="button" data-days="7">Soon</button>
+    <button type="button" data-days="0">Today</button>
+    <button type="button" data-days="-30">Expired</button>
+  </span>
+  <label>Qty (30) <input name="qty" type="number" min="1" style="width:5em"></label>
+  <label>Raw data (overrides the fields) <input name="raw" placeholder="(00)… or plain text" size="24"></label>
+  <label>Symbology
+    <select name="sym">
+      <option value="gs1datamatrix">GS1 DataMatrix</option>
+      <option value="gs1-128">GS1-128</option>
+      <option value="gs1qrcode">GS1 QR</option>
+      <option value="ean13">EAN-13 (GTIN only)</option>
+      <option value="code128">Code 128 (GTIN or raw text)</option>
+    </select>
+  </label>
+  <label>Copies (serial counts up) <input name="copies" type="number" min="1" max="200" value="1" style="width:5em"></label>
+  <button>Add</button>
+  <button type="button" id="demo">Add demo set for this GTIN</button>
+  <button type="button" onclick="print()">Print</button>
+  <button type="button" id="clear">Clear</button>
+</form>
+<p id="err" role="alert"></p>
+<div id="labels"></div>
+
+<script>
+const f = document.getElementById('f'), out = document.getElementById('labels'), err = document.getElementById('err');
+const h = (tag, props) => Object.assign(document.createElement(tag), props);
+const day = n => { const d = new Date(); d.setDate(d.getDate() + n); return d.toLocaleDateString('sv'); }; // 'sv' formats as YYYY-MM-DD in local time
+const check = body => (10 - [...body].reverse().reduce((s, c, i) => s + c * (i % 2 ? 1 : 3), 0) % 10) % 10; // GS1 mod-10
+const bump = (s, i) => s && s.replace(/\d+$/, n => String(BigInt(n) + BigInt(i)).padStart(n.length, '0'));
+console.assert(check('0950600013435') === 2 && check('10614141123456789') === 7 && bump('SN0099', 1) === 'SN0100', 'self-test failed');
+
+function gtin14(v) {
+  if (!/^\d{8,14}$/.test(v.trim())) throw Error('GTIN must be 8 to 14 digits');
+  const g = v.trim().padStart(14, '0'), c = check(g.slice(0, 13));
+  if (+g[13] !== c) throw Error(`GTIN check digit should be ${c}: ${g.slice(0, 13)}${c}`);
+  return g;
+}
+
+function add({ desc, gtin, lot, serial, exp, qty, raw, sym }) {
+  let text = raw, info = '', expired = false;
+  if (!raw) {
+    const g = gtin14(gtin);
+    if (sym === 'code128') text = g;
+    else if (sym === 'ean13') {
+      if (g[0] !== '0') throw Error('EAN-13 needs a GTIN of 13 digits or fewer');
+      text = g.slice(1);
+    } else {
+      expired = !!exp && exp < day(0);
+      // fixed-length AIs first, variable-length (lot, serial) last
+      text = `(01)${g}` + (exp ? `(17)${exp.slice(2).replace(/-/g, '')}` : '') + (qty ? `(30)${qty}` : '')
+           + (lot ? `(10)${lot}` : '') + (serial ? `(21)${serial}` : '');
+      info = [lot && `Lot ${lot}`, serial && `SN ${serial}`, exp && `Exp ${exp}${expired ? ' EXPIRED' : ''}`, qty && `Qty ${qty}`]
+        .filter(Boolean).join(' · ');
+    }
+  }
+  // bwip-js validates GS1 syntax (check digits, dates, charset) and throws on bad data
+  const canvas = bwipjs.toCanvas(h('canvas', { role: 'img', ariaLabel: text }),
+    { bcid: sym, text, scale: /matrix|qr/.test(sym) ? 4 : 2, padding: 10 });
+  const el = h('div', { className: 'label' });
+  el.append(
+    h('button', { textContent: '×', title: 'Remove', onclick: () => el.remove() }),
+    h('b', { textContent: desc }), canvas, h('code', { textContent: text }),
+    h('small', { textContent: info, className: expired ? 'expired' : '' }));
+  out.append(el);
+}
+
+function run(fn) {
+  err.textContent = '';
+  try { fn(); } catch (e) { err.textContent = e.message || e; }
+}
+
+f.onsubmit = e => {
+  e.preventDefault();
+  const d = Object.fromEntries(new FormData(f));
+  run(() => { for (let i = 0; i < (+d.copies || 1); i++) add({ ...d, serial: bump(d.serial, i) }); });
+};
+f.querySelectorAll('[data-days]').forEach(b => b.onclick = () => f.exp.value = day(+b.dataset.days));
+document.getElementById('clear').onclick = () => out.replaceChildren();
+document.getElementById('demo').onclick = () => run(() => {
+  const gtin = f.gtin.value, g = gtin14(gtin), sym = f.sym.value.startsWith('gs1') ? f.sym.value : 'gs1datamatrix';
+  const sscc = '0' + g.slice(1, 8) + '000000001';
+  [
+    { desc: 'Untracked (GTIN only)' },
+    { desc: 'Lot tracked', lot: 'LOT001' },
+    { desc: 'Serial tracked', serial: 'SN0001' },
+    { desc: 'Serial tracked', serial: 'SN0002' },
+    { desc: 'Serial tracked', serial: 'SN0003' },
+    { desc: 'Date tracked (expiry only)', exp: day(365) },
+    { desc: 'Lot + expiry: valid', lot: 'LOT002', exp: day(365) },
+    { desc: 'Lot + expiry: expiring soon', lot: 'LOT003', exp: day(7) },
+    { desc: 'Lot + expiry: expires today', lot: 'LOT004', exp: day(0) },
+    { desc: 'Lot + expiry: expired', lot: 'LOT005', exp: day(-30) },
+    { desc: 'Serial + lot + expiry', serial: 'SN0004', lot: 'LOT002', exp: day(365) },
+    { desc: 'Lot + expiry + quantity', lot: 'LOT002', exp: day(365), qty: 24 },
+    { desc: 'SSCC pallet', sym: 'gs1-128', raw: `(00)${sscc}${check(sscc)}` },
+    { desc: 'Plain Code 128 (not GS1)', sym: 'code128' },
+  ].forEach(s => add({ gtin, sym, ...s }));
+});
+if (!window.bwipjs) err.textContent = 'Could not load the barcode library (bwip-js). This page needs internet access.';
+</script>
